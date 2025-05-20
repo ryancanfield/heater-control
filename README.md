@@ -29,4 +29,3 @@ List any software dependencies beyond the Arduino IDE itself.
     * [PID_v1] - Simple PID control.
 ## License
 This project is licensed under the [MIT License](LICENSE.txt) - see the [LICENSE](LICENSE.txt) file for details.
-*(Remember to create a `LICENSE` file in your repository if you don't have one.)*
