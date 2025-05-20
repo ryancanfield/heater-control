@@ -4,12 +4,13 @@
 #include <stddef.h>
 #include <OneButton.h>
 #include <PID_v1.h>
+#include <math.h>
 
 #define PIN_DHT 10
 #define PIN_TEMP_DOWN 6
 #define PIN_TEMP_UP 8
 #define TEMP_MIN 55u
-#define TEMP_MAX 80u
+#define TEMP_MAX 85u
 #define PIN_DIMMER_OUT 9 //dimmer output
 #define PIN_DIMMER_ZC 2 //zero cross
 
@@ -22,12 +23,16 @@ typedef unsigned long ulong;
 #define MIN(a, b) ((a)<(b)?(a):(b))
 #define LIMIT(min, in, max) (MAX((min), MIN((max),(in))))
 
-static DHT dht(PIN_DHT, DHT11);
+static DHT dht(PIN_DHT, DHT22);
 static OneButton buttonTempDown;
 static OneButton buttonTempUp;
 
+bool enable = false;
 double temperature = 0.0f, dimmerOutput = 0.0f, tempSetPoint = 72.0f;
-double Kp=2, Ki=0, Kd=0;
+int dimmerOutputInt = 0;
+double Kp=4.5, Ki=0.007, Kd=0;
+//kp 10 had an oscilation of 800 seconds
+//zeigler nicholds pid = 
 PID myPID(&temperature, &dimmerOutput, &tempSetPoint, Kp, Ki, Kd, DIRECT);
 
 static float zcMicrosAverage = 0; // average microseconds between zero cross events
@@ -53,6 +58,18 @@ void tempUpClick()
     tempSetPoint = LIMIT(TEMP_MIN, tempSetPoint + 1.0, TEMP_MAX);
 }
 
+void tempUpLongPress()
+{
+    enable = true;
+    digitalWrite(PIN_HEAT,1);
+}
+
+void tempDownLongPress()
+{
+    enable = false;
+    digitalWrite(PIN_HEAT,0);
+}
+
 void setup() {
     dht.begin();
 
@@ -61,9 +78,11 @@ void setup() {
 
     buttonTempDown.setup(PIN_TEMP_DOWN, INPUT_PULLUP,true);
     buttonTempDown.attachClick(tempDownClick);
+    buttonTempDown.attachLongPressStart(tempDownLongPress);
 
     buttonTempUp.setup(PIN_TEMP_UP, INPUT_PULLUP,true);     
     buttonTempUp.attachClick(tempUpClick);
+    buttonTempUp.attachLongPressStart(tempUpLongPress);
 
     pinMode(PIN_DIMMER_OUT, OUTPUT);
     pinMode(PIN_CYCLE, OUTPUT);
@@ -101,35 +120,51 @@ void loop()
             }
 
             // get temp and calculate pid at the zc so the intervals are equal
-            temperature = dht.readTemperature(true,false);
-            myPID.Compute();
+            double t = dht.readTemperature(true,false);
+            if (!isnan(t))
+            {
+                temperature = t;
+            }
+            // set error values if temp is invalid
+            else
+            {
+                temperature = 0;
+            }
+
+            // Run PID
+            if (!isnan(t) & enable)
+            {
+                myPID.Compute();
+            }
+            else
+            {
+                dimmerOutput = 0;
+            }
+            dimmerOutputInt = round(dimmerOutput);
 
             // Enable the pin output if the dimmer output (0-10) is greater than the current cycle number
             // This will cause the dimmerOutput to turn on at cycle 0
-            if ((int)dimmerOutput > acCycle)
+            if (dimmerOutputInt > acCycle and enable)
             {
                 digitalWrite(PIN_DIMMER_OUT, HIGH);
             }
 
-            digitalWrite(PIN_CYCLE, acCycle % 2 == 0);
-
             // Scope output
-            if ((scopeMillis - millis()) > 100)
+            if ((millis() - scopeMillis) > 10000)
             {
+                scopeMillis = millis();
                 Serial.print("sp:");
                 Serial.print(tempSetPoint,1);
-                Serial.print(", t:");
-                Serial.print(dht.readTemperature(true),1);
-                Serial.print(", cycle:");
-                Serial.print(acCycle);
-                Serial.print(", dimmerOutput:");
-                Serial.println(dimmerOutput);
+                Serial.print(",t:");
+                Serial.print(temperature,1);
+                Serial.print(",dimmerOutput:");
+                Serial.println(dimmerOutputInt);
             }
         }
 
         // Disable the output if the output will be off on the next cycle
         // The triac will disable the output at the zero cross
-        if ((int)dimmerOutput <= acCycle)
+        if ((int)dimmerOutput <= acCycle or !enable)
         {
             digitalWrite(PIN_DIMMER_OUT, LOW);
         }
