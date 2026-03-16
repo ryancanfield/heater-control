@@ -53,6 +53,7 @@ static ulong ZcMicrosLast = 0; // microseconds between the last zero cross event
 static ulong ZcMicrosMax = 0;
 static ulong ZcMicrosMin = 20000;
 
+static int EffectiveOutput;
 static int Period;
 static int CyclesOn;
 
@@ -150,7 +151,7 @@ void loop()
 
             updatePidOutput();
             DimmerOutputInt = cleanPidOutput();
-            calculateCycles(DimmerOutputInt, &Period, &CyclesOn);
+            calculateCycles(DimmerOutputInt, &EffectiveOutput, &Period, &CyclesOn);
 
             writeTraceOutputs();
             updateKValueFromSerial();
@@ -239,7 +240,7 @@ int cleanPidOutput()
 // returns cycles on and cycle period
 // the intent here is to keep the off time as low as possible (1 cycle) to keep the heat output smooth
 // input is array {cycle period, cycles on}
-void calculateCycles(int input, int* period, int* cyclesOn)
+void calculateCycles(int percentIn, int* percentOut, int* period, int* cyclesOn)
 {
     static const int table[7][3] = {
         {100,1,1},
@@ -254,8 +255,9 @@ void calculateCycles(int input, int* period, int* cyclesOn)
     // find the table entry
     for (int i = 0; i < 7; i++)
     {
-        if (input >= table[i][0])
+        if (percentIn >= table[i][0])
         {
+            *percentOut = table[i][0];
             *period = table[i][1];
             *cyclesOn = table[i][2];
             break;
@@ -290,10 +292,8 @@ void writeTraceOutputs()
         Serial.print(Temperature,1);
         Serial.print(",PidOutput:");
         Serial.print(PidOutput);
-        Serial.print(",Period:");
-        Serial.print(Period);
-        Serial.print(",CyclesOn:");
-        Serial.print(CyclesOn);
+        Serial.print(",EffectiveOutput:");
+        Serial.print(EffectiveOutput);
         
         Serial.println();
     }
