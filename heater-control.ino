@@ -27,7 +27,7 @@ typedef unsigned long ulong;
 #define LIMIT(min, in, max) (MAX((min), MIN((max),(in))))
 
 static DHT dht(PIN_DHT, DHT22);
-const double DHT_IIR_N = 6.0f; //iir filter average n
+const double DHT_IIR_N = 3.0f; //iir filter average n
 
 static OneButton ButtonTempDown;
 static OneButton ButtonTempUp;
@@ -35,7 +35,7 @@ static OneButton ButtonTempUp;
 bool Enable = false;
 double Temperature = 0.0f, TemperatureRaw = 0.0f, PidOutput = 0.0f, TempSetPoint = 78.0f;
 int DimmerOutputInt = 0;
-double Kp=22.5f, Ki=0.5f, Kd=500.0f;
+double Kp=60.0f, Ki=0.25f, Kd=700.0f;
 //kp 75 had an oscilation of 89 seconds
 
 // Lots of overshoot
@@ -64,11 +64,6 @@ static ulong ZcMicrosLast = 0; // microseconds between the last zero cross event
 static ulong ZcMicrosMax = 0;
 static ulong ZcMicrosMin = 20000;
 
-float average(double in, double last, double samples)
-{
-    return last + (in - last) / samples;
-}
-
 void tempDownClick()
 {
     TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint - 1.0, TEMP_MAX);
@@ -83,15 +78,12 @@ void tempUpLongPress()
 {
     Enable = true;
     digitalWrite(PIN_HEAT,1);
-    myPID.SetMode(AUTOMATIC);
-
 }
 
 void tempDownLongPress()
 {
     Enable = false;
     digitalWrite(PIN_HEAT,0);
-    myPID.SetMode(MANUAL);
 }
 
 void setup() {
@@ -119,6 +111,7 @@ void setup() {
 void loop()
 {
     static bool cycleOn = false;
+    static bool lowTempOverride = false;
 
     ButtonTempDown.tick();
     ButtonTempUp.tick();
@@ -137,11 +130,11 @@ void loop()
             // track zc
             ZcMicrosMin = min(zcMicros, ZcMicrosMin);
             ZcMicrosMax = max(zcMicros, ZcMicrosMax);
-            ZcMicrosAverage = average((float)zcMicros, ZcMicrosAverage, 10);
+            ZcMicrosAverage = iir((float)zcMicros, ZcMicrosAverage, 10, 0.0 == ZcMicrosAverage);
             ZcMicrosLast = micros();
 
             // Enable the pin output if the dimmer output is greater than the current cycle number
-            if (Enable and cycleOn)
+            if (Enable & cycleOn)
             {
                 digitalWrite(PIN_DIMMER_OUT, HIGH);
             }
@@ -151,14 +144,33 @@ void loop()
             }
 
             computeCompute();
+            updateTemperature();
 
-            if (Compute)
+            // calc low temp override
+            // reset when enabled and temperature high
+            if (Enable & 1.0 > TempSetPoint - Temperature)
             {
-                // Run PID and tracing after the output is set, to prepare for the next zc
-                updatePidOutput();
-                DimmerOutputInt = cleanPidOutput();
-
+                lowTempOverride = false;
             }
+            // set when not enabled and temperature low
+            else if (!Enable & 1 < TempSetPoint - Temperature)
+            {
+                lowTempOverride = true;
+            }
+
+            if (!Enable)
+            {
+                // In manual mode, the pid output wiill be 100% if the setpoint is higher, 0% if lower
+                myPID.SetMode(MANUAL);
+            }
+            else
+            {
+                myPID.SetMode(AUTOMATIC);
+            }
+
+            // Run PID and tracing after the output is set, to prepare for the next zc
+            updatePidOutput();
+            DimmerOutputInt = cleanPidOutput();
 
             //cycleOn = calculateCycleEnableByPeriodic(DimmerOutputInt, &EffectiveOutput, &Period, &CyclesOn);
             cycleOn = calculateCycleByHalfDutyModulation(DimmerOutputInt);
@@ -184,29 +196,32 @@ void computeCompute()
     }
 }
 
-// writes global pidOutput
-void updatePidOutput()
+void updateTemperature()
 {
+    static double t[3] = {0,0,0};
+
+    if (Compute)
+    {
         // get temp and calculate pid at the zc so the intervals are equal
         TemperatureRaw = dht.readTemperature(true,false);
 
         if (!isnan(TemperatureRaw))
         {
-            if (Temperature == 0)
-            {
-                Temperature = TemperatureRaw;
-            } 
-            else
-            {
-                Temperature = average(TemperatureRaw, Temperature, DHT_IIR_N);
-            }
+            Temperature = iir3(TemperatureRaw, t, DHT_IIR_N, 0.0f == Temperature);
         }
         // set error values if temp is invalid
         else
         {
             Temperature = 0;
         }
+    }
+}
 
+// writes global pidOutput
+void updatePidOutput()
+{
+    if (Compute)
+    {
         // Run PID
         if ((Temperature > 0) & Enable)
         {
@@ -222,6 +237,7 @@ void updatePidOutput()
         {
             PidOutput = 0;
         }
+    }
 }
 
 // rounds the dimmer output to init, shuts down if below floor.
@@ -380,3 +396,22 @@ void writeTraceOutputs()
     }
 }
 
+double iir3(double in, double* last, double samples, bool init)
+{
+    last[0] = iir(in, last[0], samples, init);
+    last[1] = iir(last[0], last[1], samples, init);
+    last[2] = iir(last[1], last[2], samples, init);
+    return last[2];
+}
+
+double iir(double in, double last, double samples, bool init)
+{
+    if (init)
+    {
+        return in;
+    }
+    else
+    {
+        return last + (in - last) / samples;
+    }
+}
