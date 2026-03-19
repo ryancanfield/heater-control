@@ -18,7 +18,7 @@
 #define PIN_HEAT 4
 
 #define PID_MAX 100
-#define PID_MIN 49
+#define PID_MIN 39
 
 typedef unsigned long ulong;
 
@@ -35,7 +35,12 @@ static OneButton ButtonTempUp;
 bool Enable = false;
 double Temperature = 0.0f, TemperatureRaw = 0.0f, PidOutput = 0.0f, TempSetPoint = 78.0f;
 int DimmerOutputInt = 0;
-double Kp=60.0f, Ki=0.25f, Kd=700.0f;
+double Kp=40.0f; 
+double Ki=0.125f;
+// double Ki = 0.0;
+double Kd=700.0f;
+// double Kd = 0.0;
+
 //kp 75 had an oscilation of 89 seconds
 
 // Lots of overshoot
@@ -170,7 +175,6 @@ void loop()
 
             // Run PID and tracing after the output is set, to prepare for the next zc
             updatePidOutput();
-            DimmerOutputInt = cleanPidOutput();
 
             //cycleOn = calculateCycleEnableByPeriodic(DimmerOutputInt, &EffectiveOutput, &Period, &CyclesOn);
             cycleOn = calculateCycleByHalfDutyModulation(DimmerOutputInt);
@@ -237,40 +241,13 @@ void updatePidOutput()
         {
             PidOutput = 0;
         }
+
+        // turn off when at the floor. the heater isn't outputing useful heat below this level
+        if (PidOutput <= PID_MIN)
+        {
+            PidOutput = 0;
+        }
     }
-}
-
-// rounds the dimmer output to init, shuts down if below floor.
-// Runs at 100% for init time when first turning on
-// returns int from 0 to 100
-// returns 0 when the output is at PID_MIN
-int cleanPidOutput()
-{
-
-    int output = round(PidOutput);
-
-    // turn off when at the floor
-    if (output <= PID_MIN)
-    {
-        output = 0;
-    }
-
-    // reinit
-    // static int cleanDimmerLastOutput;
-    // static ulong cleanDimmerInitMillis; // counter for heater init
-
-    // if (cleanDimmerLastOutput == 0 and output > PID_MIN)
-    // {
-    //     cleanDimmerInitMillis = millis();
-    // }
-
-    // if ((millis() - cleanDimmerInitMillis) < ComputeInvertalMs)
-    // {
-    //     output = PID_MAX;
-    // }
-
-    // cleanDimmerLastOutput = output;
-    return output;
 }
 
 // returns true when next cycle should be on
@@ -316,53 +293,23 @@ bool calculateCycleEnableByPeriodic(int percentIn)
     return cycleCount < cyclesOn;
 }
 
-// calculate the off cycle by alternating betwen 50% DC and 100%.
-// this limits the low output to 50% but allows high control resolution.
+// calculate the off cycle by alternating betwen 50% DC, and 100%.
+// the intent here is to limit the visible voltage changes
 // returns true if the next half-cycle should be on.
-bool calculateCycleByHalfDutyModulation(int percentIn)
+bool calculateCycleByHalfDutyModulation(double percentIn)
 {
-    // ms/% = Ms/Interval / Percent/Interval
-    // ms/period = 50%/period * ms/% (because 50%, not 0%, is the lowest limit with this method)
-    // Period at 100ms/interval and 5%/interval is 100ms/interval * 20ms/interval = 2000ms
-    const int halfCyclesPerInterval = 12; // 12 half-cycles is 100ms/interval
-    const int percentPerInterval = 5; // PID output percent that each interval represents.
-    const int intervalsPerPeriod = 50 / percentPerInterval;
-    static int halfCycleCount = 0;
-    static int intervalCount = 0;
-    static bool halfCycleToggle = false;
+    static double bucket = 0;
 
-    int fullCycleIntervalsPerPeriod = round(((float)percentIn - 50.0) / (float)percentPerInterval); //go to 50% duty cycle at this interval
+    bucket += percentIn;
 
-    halfCycleToggle = !halfCycleToggle;
-
-    if (++halfCycleCount >= halfCyclesPerInterval)
+    if (bucket > 100)
     {
-        halfCycleCount = 0;
-
-        if (++intervalCount >= intervalsPerPeriod)
-        {
-            intervalCount = 0;
-        }
-    }
-
-    if (Compute)
-    {
-        Serial.print(",EffectiveOutput:");
-        Serial.print(fullCycleIntervalsPerPeriod * percentPerInterval + 50);
-    }
-
-    // output 0 at < 50%. This method can't control below that
-    if (percentIn <= 50)
-    {
-        return false;
-    }
-    else if (intervalCount < fullCycleIntervalsPerPeriod)
-    {
+        bucket -= 100.0;
         return true;
     }
     else
     {
-        return halfCycleToggle;
+        return false;
     }
 }
 
