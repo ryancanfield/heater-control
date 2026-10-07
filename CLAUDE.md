@@ -36,7 +36,8 @@ Control details:
   - Disabled, or no valid temperature (`Temperature <= 0`, i.e. a DHT read failed): PID in `MANUAL`, output 0.
   - Low-temperature override (`deriveLowTemperatureOverride()`): PID in `MANUAL`, output `PID_MAX`, to warm up without integral windup. It latches on when more than `OVERRIDE_SET_ERROR` (2 °F) below setpoint and clears when within `OVERRIDE_RESET_ERROR` (1 °F).
   - Otherwise: PID in `AUTOMATIC`. On the switch from `MANUAL`, `PidOutput` is set to `PID_MIN` first, because `SetMode(AUTOMATIC)` seeds the PID integral from the current output.
-- Buttons (OneButton, active-low with pullups): click = setpoint ±1 °F (clamped 55–85); long-press up = enable heater, long-press down = disable. `PIN_HEAT` mirrors the enable state.
+- Buttons (OneButton, active-low with pullups): click = setpoint ±1 °F (clamped 55–85); long-press up = enable heater, long-press down = disable.
+- Status LED (`PIN_LIGHT`): `deriveLightState()` maps error flags and `Enable` to a `LightState`, and `updateLight()` drives the pin every `loop()` iteration, using `millis()` for blink timing. Disabled always means off (errors are not shown); when enabled, errors take priority over the steady-on state. Currently: off = disabled, on = enabled, 1 Hz blink = temperature sensor error while enabled (`TempSensorError`). To add an indication, add an error flag, a `LightState` value, a branch in `deriveLightState()`, and a case in `updateLight()`.
 - Tuning gains `Kp/Ki/Kd` are globals near the top, with commented Ziegler–Nichols notes and observed oscillation periods.
 
 ## Known quirks

@@ -14,8 +14,7 @@
 #define PIN_DIMMER_OUT 9 //dimmer output
 #define PIN_DIMMER_ZC 2 //zero cross
 
-#define PIN_CYCLE 3
-#define PIN_HEAT 4
+#define PIN_LIGHT 4
 
 #define PID_MAX 100
 #define PID_MIN 39
@@ -72,6 +71,19 @@ static ulong ZcMicrosLast = 0; // microseconds between the last zero cross event
 static ulong ZcMicrosMax = 0;
 static ulong ZcMicrosMin = 20000;
 
+// Status light patterns. Add a state here and a case in updateLight() for new indications.
+enum LightState
+{
+    LIGHT_OFF,       // heater disabled
+    LIGHT_ON,        // heater enabled
+    LIGHT_BLINK_1HZ  // temperature sensor error
+};
+
+const ulong LightBlink1HzHalfPeriodMs = 500;
+
+// Error flags. Each maps to a light state in deriveLightState().
+static bool TempSensorError = false;
+
 void tempDownClick()
 {
     TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint - 1.0, TEMP_MAX);
@@ -85,13 +97,11 @@ void tempUpClick()
 void tempUpLongPress()
 {
     Enable = true;
-    digitalWrite(PIN_HEAT,1);
 }
 
 void tempDownLongPress()
 {
     Enable = false;
-    digitalWrite(PIN_HEAT,0);
 }
 
 void setup() {
@@ -109,8 +119,7 @@ void setup() {
     ButtonTempUp.attachLongPressStart(tempUpLongPress);
 
     pinMode(PIN_DIMMER_OUT, OUTPUT);
-    pinMode(PIN_CYCLE, OUTPUT);
-    pinMode(PIN_HEAT, OUTPUT);
+    pinMode(PIN_LIGHT, OUTPUT);
 
     myPID.SetOutputLimits(PID_MIN, PID_MAX);
     myPID.SetSampleTime(ComputeInvertalMs); //dht22 will only read a value every 2s
@@ -122,6 +131,8 @@ void loop()
 
     ButtonTempDown.tick();
     ButtonTempUp.tick();
+
+    updateLight(deriveLightState());
 
     ulong zcMicros; //micros since last zc event
     zcMicros = micros() - ZcMicrosLast;
@@ -210,6 +221,47 @@ bool deriveLowTemperatureOverride()
     return lowTempOverride;
 }
 
+// Select the light state. Light is off when disabled; otherwise errors take priority over normal status, highest priority first.
+LightState deriveLightState()
+{
+    if (!Enable)
+    {
+        return LIGHT_OFF;
+    }
+    else if (TempSensorError)
+    {
+        return LIGHT_BLINK_1HZ;
+    }
+    else
+    {
+        return LIGHT_ON;
+    }
+}
+
+// Drive the status light for the given state. Call every loop; blink timing is based on millis().
+void updateLight(LightState state)
+{
+    bool on;
+
+    switch (state)
+    {
+        case LIGHT_ON:
+            on = true;
+            break;
+
+        case LIGHT_BLINK_1HZ:
+            on = 0 == (millis() / LightBlink1HzHalfPeriodMs) % 2;
+            break;
+
+        case LIGHT_OFF:
+        default:
+            on = false;
+            break;
+    }
+
+    digitalWrite(PIN_LIGHT, on ? HIGH : LOW);
+}
+
 void computeCompute()
 {
     static ulong computeMs;
@@ -237,11 +289,13 @@ void updateTemperature()
         if (!isnan(TemperatureRaw))
         {
             Temperature = iir3(round(TemperatureRaw * 10.0) / 10.0, t, n, 0.0 == Temperature);
+            TempSensorError = false;
         }
         // set error values if temp is invalid
         else
         {
             Temperature = 0;
+            TempSensorError = true;
         }
     }
 }
