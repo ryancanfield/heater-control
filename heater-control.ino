@@ -27,7 +27,6 @@ typedef unsigned long ulong;
 #define LIMIT(min, in, max) (MAX((min), MIN((max),(in))))
 
 static DHT dht(PIN_DHT, DHT22);
-const double DHT_IIR_N = 3.0f; //iir filter average n
 
 static OneButton ButtonTempDown;
 static OneButton ButtonTempUp;
@@ -116,7 +115,6 @@ void setup() {
 void loop()
 {
     static bool cycleOn = false;
-    static bool lowTempOverride = false;
 
     ButtonTempDown.tick();
     ButtonTempUp.tick();
@@ -132,6 +130,7 @@ void loop()
         // after the zc is first observed, calculated the PID and write outputs for the next cycle
         if (1 == digitalRead(PIN_DIMMER_ZC))
         {
+            //****** Track ZC metrics and set triac output ******
             // track zc
             ZcMicrosMin = min(zcMicros, ZcMicrosMin);
             ZcMicrosMax = max(zcMicros, ZcMicrosMax);
@@ -148,41 +147,51 @@ void loop()
                 digitalWrite(PIN_DIMMER_OUT, LOW);
             }
 
+            //****** Calculate next cycle after the outputs for the current cycle are set ******
+            // This allows the longest time to run calculations and output any trace data without impacting the zc detection.
             computeCompute();
             updateTemperature();
 
-            // calc low temp override
-            // reset when enabled and temperature high
-            if (Enable & 1.0 > TempSetPoint - Temperature)
+            if (Enable & !deriveLowTemperatureOverride())
             {
-                lowTempOverride = false;
-            }
-            // set when not enabled and temperature low
-            else if (!Enable & 1 < TempSetPoint - Temperature)
-            {
-                lowTempOverride = true;
-            }
-
-            if (!Enable)
-            {
-                // In manual mode, the pid output wiill be 100% if the setpoint is higher, 0% if lower
-                myPID.SetMode(MANUAL);
+                myPID.SetMode(AUTOMATIC);
             }
             else
             {
-                myPID.SetMode(AUTOMATIC);
+                myPID.SetMode(MANUAL);
+                PidOutput = 0.0;
             }
 
             // Run PID and tracing after the output is set, to prepare for the next zc
             updatePidOutput();
 
-            //cycleOn = calculateCycleEnableByPeriodic(DimmerOutputInt, &EffectiveOutput, &Period, &CyclesOn);
-            cycleOn = calculateCycleByHalfDutyModulation(DimmerOutputInt);
+            cycleOn = calculateCycleByDeltaSigma(PidOutput);
 
             updateKValueFromSerial();
             writeTraceOutputs();
         }
     }
+}
+
+// Returns true if the temperature is low (error is high).
+// Latches until error is low.
+bool deriveLowTemperatureOverride()
+{
+    static bool lowTempOverride = false;
+
+    // calc low temp override
+    // reset when temperature high
+    if (1.0 > TempSetPoint - Temperature)
+    {
+        lowTempOverride = false;
+    }
+    // set when temperature is low
+    else if (1.0 < TempSetPoint - Temperature)
+    {
+        lowTempOverride = true;
+    }
+    
+    return lowTempOverride;
 }
 
 void computeCompute()
@@ -202,16 +211,16 @@ void computeCompute()
 
 void updateTemperature()
 {
+    const double n = 3.0; //iir filter average n
     static double t[3] = {0,0,0};
 
     if (Compute)
     {
-        // get temp and calculate pid at the zc so the intervals are equal
         TemperatureRaw = dht.readTemperature(true,false);
 
         if (!isnan(TemperatureRaw))
         {
-            Temperature = iir3(TemperatureRaw, t, DHT_IIR_N, 0.0f == Temperature);
+            Temperature = iir3(round(TemperatureRaw * 10.0) / 10.0, t, n, 0.0 == Temperature);
         }
         // set error values if temp is invalid
         else
@@ -250,53 +259,9 @@ void updatePidOutput()
     }
 }
 
-// returns true when next cycle should be on
-// the intent here is to keep the off time as low as possible (1 cycle) to keep the heat output smooth
-// input is array {cycle period, cycles on}
-// 20260318 - the flicker is still observable because it creates a pattern
-bool calculateCycleEnableByPeriodic(int percentIn)
-{
-    static int cycleCount = 0;
-    int period;
-    int cyclesOn;
-    int percentOut;
-
-    static const int table[7][3] = {
-        {100,1,1},
-        {90,10,9},
-        {80,5,4},
-        {75,4,3},
-        {67,3,2},
-        {50,2,1},
-        {0,1,0}
-    };
-
-    // find the table entry
-    for (int i = 0; i < 7; i++)
-    {
-        if (percentIn >= table[i][0])
-        {
-            percentOut = table[i][0];
-            period = table[i][1];
-            cyclesOn = table[i][2];
-            break;
-        }
-    }
-
-    // count the cycles
-    if (++cycleCount >= period)
-    {
-        cycleCount = 0;
-    }
-
-    // Enable the pin output if the current cycle is less than the number of on-cycles
-    return cycleCount < cyclesOn;
-}
-
-// calculate the off cycle by alternating betwen 50% DC, and 100%.
-// the intent here is to limit the visible voltage changes
+// Determine if cycle should be on using Bresenham/Delta-Sigma Algorithm
 // returns true if the next half-cycle should be on.
-bool calculateCycleByHalfDutyModulation(double percentIn)
+bool calculateCycleByDeltaSigma(double percentIn)
 {
     static double bucket = 0;
 
