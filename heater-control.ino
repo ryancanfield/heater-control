@@ -20,6 +20,10 @@
 #define PID_MAX 100
 #define PID_MIN 39
 
+// low temperature override hysteresis (deg F below setpoint)
+#define OVERRIDE_SET_ERROR 2.0
+#define OVERRIDE_RESET_ERROR 1.0
+
 typedef unsigned long ulong;
 
 #define MAX(a, b) ((a)>(b)?(a):(b))
@@ -152,14 +156,25 @@ void loop()
             computeCompute();
             updateTemperature();
 
-            if (Enable & !deriveLowTemperatureOverride())
-            {
-                myPID.SetMode(AUTOMATIC);
-            }
-            else
+            // Disabled or no valid temperature: heater off.
+            // Far below setpoint: full output with the PID bypassed to avoid integral windup.
+            // Otherwise: PID control.
+            if (!Enable | (Temperature <= 0))
             {
                 myPID.SetMode(MANUAL);
                 PidOutput = 0.0;
+            }
+            else if (deriveLowTemperatureOverride())
+            {
+                myPID.SetMode(MANUAL);
+                PidOutput = PID_MAX;
+            }
+            else if (MANUAL == myPID.GetMode())
+            {
+                // SetMode(AUTOMATIC) seeds the integral from PidOutput; start it at the floor
+                // so the full-power warm-up doesn't carry over and cause overshoot.
+                PidOutput = PID_MIN;
+                myPID.SetMode(AUTOMATIC);
             }
 
             // Run PID and tracing after the output is set, to prepare for the next zc
@@ -178,19 +193,20 @@ void loop()
 bool deriveLowTemperatureOverride()
 {
     static bool lowTempOverride = false;
+    double error = TempSetPoint - Temperature;
 
     // calc low temp override
-    // reset when temperature high
-    if (1.0 > TempSetPoint - Temperature)
+    // reset when temperature is near the setpoint
+    if (error < OVERRIDE_RESET_ERROR)
     {
         lowTempOverride = false;
     }
     // set when temperature is low
-    else if (1.0 < TempSetPoint - Temperature)
+    else if (error > OVERRIDE_SET_ERROR)
     {
         lowTempOverride = true;
     }
-    
+
     return lowTempOverride;
 }
 
@@ -267,7 +283,7 @@ bool calculateCycleByDeltaSigma(double percentIn)
 
     bucket += percentIn;
 
-    if (bucket > 100)
+    if (bucket >= 100.0)
     {
         bucket -= 100.0;
         return true;
@@ -278,17 +294,29 @@ bool calculateCycleByDeltaSigma(double percentIn)
     }
 }
 
-int updateKValueFromSerial()
-{  // if there's any serial available, read it:
-  while (Serial.available() > 0) {
+// Non-blocking read of a positive integer Kp from serial; applied when a non-digit (e.g. newline) arrives.
+// Serial.parseInt() is not used because it blocks for up to its timeout, which would stall zc detection.
+void updateKValueFromSerial()
+{
+    static long val = 0;
 
-    // look for the next valid integer in the incoming serial stream:
-    long val = Serial.parseInt();
-    if (val > 0)
+    while (Serial.available() > 0)
     {
-        Kp = val;
+        char c = Serial.read();
+
+        if (('0' <= c) & (c <= '9'))
+        {
+            val = val * 10 + (c - '0');
+        }
+        else
+        {
+            if (val > 0)
+            {
+                Kp = val;
+            }
+            val = 0;
+        }
     }
-  }
 }
 
 void writeTraceOutputs()
