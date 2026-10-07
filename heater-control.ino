@@ -34,7 +34,9 @@ static DHT dht(PIN_DHT, DHT22);
 static OneButton ButtonTempDown;
 static OneButton ButtonTempUp;
 
-bool Enable = false;
+static bool Enable = false;
+static bool cycleOn = false;
+
 double Temperature = 0.0f, TemperatureRaw = 0.0f, PidOutput = 0.0f, TempSetPoint = 78.0f;
 int DimmerOutputInt = 0;
 double Kp=40.0f; 
@@ -66,6 +68,7 @@ PID myPID(&Temperature, &PidOutput, &TempSetPoint, Kp, Ki, Kd, DIRECT);
 static bool Compute = false; // global command to process inputs, outputs, and traces
 const ulong ComputeInvertalMs = 2500; // ms interval to compute temp and PID
 
+ulong zcMicros; //micros since last zc event
 static float ZcMicrosAverage = 0; // average microseconds between zero cross events
 static ulong ZcMicrosLast = 0; // microseconds between the last zero cross event
 static ulong ZcMicrosMax = 0;
@@ -83,26 +86,6 @@ const ulong LightBlink1HzHalfPeriodMs = 500;
 
 // Error flags. Each maps to a light state in deriveLightState().
 static bool TempSensorError = false;
-
-void tempDownClick()
-{
-    TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint - 1.0, TEMP_MAX);
-}
-
-void tempUpClick()
-{
-    TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint + 1.0, TEMP_MAX);
-}
-
-void tempUpLongPress()
-{
-    Enable = true;
-}
-
-void tempDownLongPress()
-{
-    Enable = false;
-}
 
 void setup() {
     dht.begin();
@@ -127,76 +110,115 @@ void setup() {
 
 void loop()
 {
-    static bool cycleOn = false;
+    heater();
 
     ButtonTempDown.tick();
     ButtonTempUp.tick();
 
     updateLight(deriveLightState());
+}
 
-    ulong zcMicros; //micros since last zc event
+// Runs the heater loops and message sending
+void heater()
+{
     zcMicros = micros() - ZcMicrosLast;
 
-    // Look for zc
-    // Should occur every 8.3ms.
-    // Execute the math for the next cycle after the zc is observed to allow the most time for calculatino.
-    if (zcMicros > 8000)
+    // No zcOberved for 3 cycles, turn off the heater
+    if (zcMicros > 24000)
     {
-        // after the zc is first observed, calculated the PID and write outputs for the next cycle
-        if (1 == digitalRead(PIN_DIMMER_ZC))
+        ZcMicrosLast = micros();
+
+        // Disable the output
+        Enable = false;
+        digitalWrite(PIN_DIMMER_OUT, LOW);
+
+        // Disable the PID
+        myPID.SetMode(MANUAL);
+        PidOutput = 0.0;
+
+        // Message the user
+        computeCompute();
+        if (Compute)
         {
-            //****** Track ZC metrics and set triac output ******
-            // track zc
-            ZcMicrosMin = min(zcMicros, ZcMicrosMin);
-            ZcMicrosMax = max(zcMicros, ZcMicrosMax);
-            ZcMicrosAverage = iir((float)zcMicros, ZcMicrosAverage, 10, 0.0 == ZcMicrosAverage);
-            ZcMicrosLast = micros();
-
-            // Enable the pin output if the dimmer output is greater than the current cycle number
-            if (Enable & cycleOn)
-            {
-                digitalWrite(PIN_DIMMER_OUT, HIGH);
-            }
-            else
-            {
-                digitalWrite(PIN_DIMMER_OUT, LOW);
-            }
-
-            //****** Calculate next cycle after the outputs for the current cycle are set ******
-            // This allows the longest time to run calculations and output any trace data without impacting the zc detection.
-            computeCompute();
-            updateTemperature();
-
-            // Disabled or no valid temperature: heater off.
-            // Far below setpoint: full output with the PID bypassed to avoid integral windup.
-            // Otherwise: PID control.
-            if (!Enable | (Temperature <= 0))
-            {
-                myPID.SetMode(MANUAL);
-                PidOutput = 0.0;
-            }
-            else if (deriveLowTemperatureOverride())
-            {
-                myPID.SetMode(MANUAL);
-                PidOutput = PID_MAX;
-            }
-            else if (MANUAL == myPID.GetMode())
-            {
-                // SetMode(AUTOMATIC) seeds the integral from PidOutput; start it at the floor
-                // so the full-power warm-up doesn't carry over and cause overshoot.
-                PidOutput = PID_MIN;
-                myPID.SetMode(AUTOMATIC);
-            }
-
-            // Run PID and tracing after the output is set, to prepare for the next zc
-            updatePidOutput();
-
-            cycleOn = calculateCycleByDeltaSigma(PidOutput);
-
-            updateKValueFromSerial();
-            writeTraceOutputs();
+            Serial.println("No AC signal detected");
         }
     }
+
+    // Look for zc. It should occur every 8.3ms. 
+    // Execute the math for the next cycle after the zc is observed to allow the most time for calculation.
+    else if (zcMicros > 8000 & 1 == digitalRead(PIN_DIMMER_ZC))
+    {
+        //****** Track ZC metrics and set triac output ******
+        // track zc
+        ZcMicrosMin = min(zcMicros, ZcMicrosMin);
+        ZcMicrosMax = max(zcMicros, ZcMicrosMax);
+        ZcMicrosAverage = iir((float)zcMicros, ZcMicrosAverage, 10, 0.0 == ZcMicrosAverage);
+        ZcMicrosLast = micros();
+
+        // Enable the pin output if the dimmer output is greater than the current cycle number
+        if (Enable & cycleOn)
+        {
+            digitalWrite(PIN_DIMMER_OUT, HIGH);
+        }
+        else
+        {
+            digitalWrite(PIN_DIMMER_OUT, LOW);
+        }
+
+        //****** Calculate next cycle after the outputs for the current cycle are set ******
+        // This allows the longest time to run calculations and output any trace data without impacting the zc detection.
+        computeCompute();
+        updateTemperature();
+
+        // Disabled or no valid temperature: heater off.
+        // Far below setpoint: full output with the PID bypassed to avoid integral windup.
+        // Otherwise: PID control.
+        if (!Enable | (Temperature <= 0))
+        {
+            myPID.SetMode(MANUAL);
+            PidOutput = 0.0;
+        }
+        else if (deriveLowTemperatureOverride())
+        {
+            myPID.SetMode(MANUAL);
+            PidOutput = PID_MAX;
+        }
+        else if (MANUAL == myPID.GetMode())
+        {
+            // SetMode(AUTOMATIC) seeds the integral from PidOutput; start it at the floor
+            // so the full-power warm-up doesn't carry over and cause overshoot.
+            PidOutput = PID_MIN;
+            myPID.SetMode(AUTOMATIC);
+        }
+
+        // Run PID and tracing after the output is set, to prepare for the next zc
+        updatePidOutput();
+
+        cycleOn = calculateCycleByDeltaSigma(PidOutput);
+
+        updateKValueFromSerial();
+        writeTraceOutputs();
+    }
+}
+
+void tempDownClick()
+{
+    TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint - 1.0, TEMP_MAX);
+}
+
+void tempUpClick()
+{
+    TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint + 1.0, TEMP_MAX);
+}
+
+void tempUpLongPress()
+{
+    Enable = true;
+}
+
+void tempDownLongPress()
+{
+    Enable = false;
 }
 
 // Returns true if the temperature is low (error is high).
