@@ -8,7 +8,7 @@ Single-file Arduino sketch ([heater-control.ino](heater-control.ino)) implementi
 
 ## Build / Upload
 
-Built with the Arduino IDE; there are no tests. Required libraries, installed via the IDE Library Manager: `DHT` (Adafruit DHT sensor library), `OneButton`, `PID_v1` (Brett Beauregard). The target board is not pinned in the repo; assume an AVR board (Uno/Nano class).
+Built with the Arduino IDE; there are no tests. Required libraries, installed via the IDE Library Manager: `DHT` (Adafruit DHT sensor library), `OneButton`, `PID_v1` (Brett Beauregard), `hd44780` (Bill Perry). The target board is not pinned in the repo; assume an AVR board (Uno/Nano class).
 
 To compile-check from the command line, use the arduino-cli bundled with the IDE (not on PATH):
 
@@ -38,6 +38,7 @@ Control details:
   - Otherwise: PID in `AUTOMATIC`. On the switch from `MANUAL`, `PidOutput` is set to `PID_MIN` first, because `SetMode(AUTOMATIC)` seeds the PID integral from the current output.
 - Buttons (OneButton, active-low with pullups): click = setpoint ±1 °F (clamped 55–85); long-press up = enable heater, long-press down = disable.
 - Status LED (`PIN_LIGHT`): `deriveLightState()` maps error flags and `Enable` to a `LightState`, and `updateLight()` drives the pin every `loop()` iteration, using `millis()` for blink timing. Disabled always means off (errors are not shown); when enabled, errors take priority over the steady-on state. Currently: off = disabled, on = enabled, 1 Hz blink = temperature sensor error while enabled (`TempSensorError`). To add an indication, add an error flag, a `LightState` value, a branch in `deriveLightState()`, and a case in `updateLight()`.
+- LCD (1602A, `hd44780_pinIO`, 4-bit, RW tied to GND; RS=3, E=5, D4=7, D5=11, D6=12, D7=13): `updateDisplay()` shows setpoint, temperature and `PidOutput`. It refreshes every `DisplayIntervalMs` (250 ms), writing one row per half-cycle (~1.5 ms each) and skipping `Compute` half-cycles so the DHT read and LCD writes never share a half-cycle.
 - Tuning gains `Kp/Ki/Kd` are globals near the top, with commented Ziegler–Nichols notes and observed oscillation periods.
 
 ## Known quirks

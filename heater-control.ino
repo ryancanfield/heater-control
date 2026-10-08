@@ -5,6 +5,8 @@
 #include <OneButton.h>
 #include <PID_v1.h>
 #include <math.h>
+#include <hd44780.h>
+#include <hd44780ioClass/hd44780_pinIO.h>
 
 #define PIN_DHT 10
 #define PIN_TEMP_DOWN 6
@@ -15,6 +17,16 @@
 #define PIN_DIMMER_ZC 2 //zero cross
 
 #define PIN_LIGHT 4
+
+// 1602A LCD, 4-bit mode, RW tied to ground
+#define PIN_LCD_RS 3
+#define PIN_LCD_EN 5
+#define PIN_LCD_D4 7
+#define PIN_LCD_D5 11
+#define PIN_LCD_D6 12
+#define PIN_LCD_D7 13
+#define LCD_COLS 16
+#define LCD_ROWS 2
 
 #define PID_MAX 100
 #define PID_MIN 39
@@ -33,6 +45,10 @@ static DHT dht(PIN_DHT, DHT22);
 
 static OneButton ButtonTempDown;
 static OneButton ButtonTempUp;
+
+static hd44780_pinIO lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7);
+const ulong DisplayIntervalMs = 250; // ms between display refreshes
+static bool LcdOk = false;
 
 static bool Enable = false;
 static bool cycleOn = false;
@@ -104,6 +120,9 @@ void setup() {
     pinMode(PIN_DIMMER_OUT, OUTPUT);
     pinMode(PIN_LIGHT, OUTPUT);
 
+    // begin() blocks for a few ms; fine here, before zc tracking starts
+    LcdOk = 0 == lcd.begin(LCD_COLS, LCD_ROWS);
+
     myPID.SetOutputLimits(PID_MIN, PID_MAX);
     myPID.SetSampleTime(ComputeInvertalMs); //dht22 will only read a value every 2s
 }
@@ -142,6 +161,8 @@ void heater()
         {
             Serial.println("No AC signal detected");
         }
+
+        updateDisplay();
     }
 
     // Look for zc. It should occur every 8.3ms. 
@@ -198,6 +219,7 @@ void heater()
 
         updateKValueFromSerial();
         writeTraceOutputs();
+        updateDisplay();
     }
 }
 
@@ -409,6 +431,45 @@ void writeTraceOutputs()
         Serial.print(",PidOutput:");
         Serial.print(PidOutput);        
         Serial.println();
+    }
+}
+
+// Refresh the LCD, one row per half-cycle so each write (~1.5 ms) fits in the remaining time.
+// Skipped on Compute half-cycles, which already spend most of the half-cycle on the DHT read and trace.
+// Row 0: "Set  78.0*F Heat"   (* is the LCD degree symbol, 0xDF)
+// Row 1: "Temp 72.3*F  45%"
+void updateDisplay()
+{
+    static char lines[LCD_ROWS][LCD_COLS + 1];
+    static uint8_t row = LCD_ROWS; // next row to write; LCD_ROWS = idle
+    static ulong displayMs;
+
+    if (!LcdOk | Compute)
+    {
+        return;
+    }
+
+    // start a new refresh: snapshot both rows so they are consistent
+    if ((row >= LCD_ROWS) & (millis() - displayMs > DisplayIntervalMs))
+    {
+        char num[8];
+
+        displayMs = millis();
+
+        dtostrf(TempSetPoint, 5, 1, num);
+        snprintf(lines[0], sizeof(lines[0]), "Set %s\xDF" "F Heat", num);
+
+        dtostrf(Temperature, 5, 1, num);
+        snprintf(lines[1], sizeof(lines[1]), "Temp%s\xDF" "F %3d%%", num, (int)(PidOutput + 0.5));
+
+        row = 0;
+    }
+
+    if (row < LCD_ROWS)
+    {
+        lcd.setCursor(0, row);
+        lcd.write((const uint8_t*)lines[row], LCD_COLS);
+        row++;
     }
 }
 
