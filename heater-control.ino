@@ -2,29 +2,28 @@
 #include <DHT.h>
 #include <string.h>
 #include <stddef.h>
-#include <OneButton.h>
 #include <PID_v1.h>
 #include <math.h>
-#include <hd44780.h>
-#include <hd44780ioClass/hd44780_pinIO.h>
+#include <LiquidCrystal.h>
 
-#define PIN_DHT 10
-#define PIN_TEMP_DOWN 6
-#define PIN_TEMP_UP 8
+#define PIN_DHT_0V 13
+#define PIN_DHT_VCC 12
+#define PIN_DHT_OUT 11
 #define TEMP_MIN 55u
 #define TEMP_MAX 85u
-#define PIN_DIMMER_OUT 9 //dimmer output
+#define PIN_DIMMER_OUT 3 //dimmer output
 #define PIN_DIMMER_ZC 2 //zero cross
+#define PIN_LIGHT 1
 
-#define PIN_LIGHT 4
+#define BUTTON_PIN A0 // resistor ladder buttons on lcd shield
 
 // 1602A LCD, 4-bit mode, RW tied to ground
-#define PIN_LCD_RS 3
-#define PIN_LCD_EN 5
-#define PIN_LCD_D4 7
-#define PIN_LCD_D5 11
-#define PIN_LCD_D6 12
-#define PIN_LCD_D7 13
+#define PIN_LCD_RS 8
+#define PIN_LCD_EN 9
+#define PIN_LCD_D4 4
+#define PIN_LCD_D5 5
+#define PIN_LCD_D6 6
+#define PIN_LCD_D7 7
 #define LCD_COLS 16
 #define LCD_ROWS 2
 
@@ -41,19 +40,26 @@ typedef unsigned long ulong;
 #define MIN(a, b) ((a)<(b)?(a):(b))
 #define LIMIT(min, in, max) (MAX((min), MIN((max),(in))))
 
-static DHT dht(PIN_DHT, DHT22);
+static DHT dht(PIN_DHT_OUT, DHT22);
+static LiquidCrystal lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7);
 
-static OneButton ButtonTempDown;
-static OneButton ButtonTempUp;
+static bool ButtonRight;
+static bool ButtonUp;
+static bool ButtonDown;
+static bool ButtonLeft;
+static bool ButtonSelect;
+static bool ButtonReset;
 
-static hd44780_pinIO lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7);
 const ulong DisplayIntervalMs = 250; // ms between display refreshes
 static bool LcdOk = false;
 
 static bool Enable = false;
-static bool cycleOn = false;
+static bool CycleOn = false;
 
-double Temperature = 0.0f, TemperatureRaw = 0.0f, PidOutput = 0.0f, TempSetPoint = 78.0f;
+static bool Error = false;
+static char ErrorString[LCD_COLS + 2] = "";
+
+double Temperature = 0.0f, TemperatureRaw = 0.0f, Humidity, PidOutput = 0.0f, TempSetPoint = 78.0f;
 int DimmerOutputInt = 0;
 double Kp=40.0f; 
 double Ki=0.125f;
@@ -100,28 +106,22 @@ enum LightState
 
 const ulong LightBlink1HzHalfPeriodMs = 500;
 
-// Error flags. Each maps to a light state in deriveLightState().
-static bool TempSensorError = false;
-
 void setup() {
+    pinMode(PIN_DIMMER_OUT, OUTPUT);
+
+    pinMode(PIN_DHT_VCC, OUTPUT);
+    digitalWrite(PIN_DHT_VCC, HIGH);
+
+    pinMode(PIN_DHT_0V, OUTPUT);
+    digitalWrite(PIN_DHT_0V, LOW);
+
     dht.begin();
 
     // The built-in serial class was left as c++
     Serial.begin(115200);
 
-    ButtonTempDown.setup(PIN_TEMP_DOWN, INPUT_PULLUP,true);
-    ButtonTempDown.attachClick(tempDownClick);
-    ButtonTempDown.attachLongPressStart(tempDownLongPress);
-
-    ButtonTempUp.setup(PIN_TEMP_UP, INPUT_PULLUP,true);     
-    ButtonTempUp.attachClick(tempUpClick);
-    ButtonTempUp.attachLongPressStart(tempUpLongPress);
-
-    pinMode(PIN_DIMMER_OUT, OUTPUT);
-    pinMode(PIN_LIGHT, OUTPUT);
-
     // begin() blocks for a few ms; fine here, before zc tracking starts
-    LcdOk = 0 == lcd.begin(LCD_COLS, LCD_ROWS);
+    lcd.begin(LCD_COLS, LCD_ROWS);
 
     myPID.SetOutputLimits(PID_MIN, PID_MAX);
     myPID.SetSampleTime(ComputeInvertalMs); //dht22 will only read a value every 2s
@@ -130,11 +130,95 @@ void setup() {
 void loop()
 {
     heater();
+    getButtons();
+}
 
-    ButtonTempDown.tick();
-    ButtonTempUp.tick();
+void getButtons()
+{
+    int key = analogRead(BUTTON_PIN);
 
-    updateLight(deriveLightState());
+    if (key < 50)
+    {
+        ButtonRight = true;
+        ButtonUp = false;
+        ButtonDown = false;
+        ButtonLeft = false;
+        ButtonSelect = false;
+        ButtonReset = false;
+    }
+
+    else if (key < 200)
+    {
+        ButtonRight = false;
+        ButtonDown = false;
+        ButtonLeft = false;
+        ButtonSelect = false;
+        ButtonReset = false;
+        
+        if (!ButtonUp)
+        {
+            ButtonUp = true;
+            TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint + 1.0, TEMP_MAX);
+        }
+    }
+
+    else if (key < 400)
+    {
+        ButtonRight = false;
+        ButtonUp = false;
+        ButtonLeft = false;
+        ButtonSelect = false;
+        ButtonReset = false;
+        
+        if (!ButtonDown)
+        {
+            ButtonDown = true;
+            TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint - 1.0, TEMP_MAX);
+        }
+    }
+
+    else if (key < 600)
+    {
+        ButtonRight = false;
+        ButtonUp = false;
+        ButtonDown = false;
+        ButtonLeft = true;
+        ButtonSelect = false;
+        ButtonReset = false;
+    }
+
+    else if (key < 800)
+    {
+        ButtonRight = false;
+        ButtonUp = false;
+        ButtonDown = false;
+        ButtonLeft = false;
+        ButtonReset = false;
+        
+        if (!ButtonSelect)
+        {
+            ButtonSelect = true;
+            Enable = !Enable;
+        }
+    }
+    else if (key < 1000)
+    {
+        ButtonRight = false;
+        ButtonUp = false;
+        ButtonDown = false;
+        ButtonLeft = false;
+        ButtonSelect = false;
+        ButtonReset = true;
+    }
+    else
+    {
+        ButtonRight = false;
+        ButtonUp = false;
+        ButtonDown = false;
+        ButtonLeft = false;
+        ButtonSelect = false;
+        ButtonReset = false;
+    }
 }
 
 // Runs the heater loops and message sending
@@ -162,7 +246,9 @@ void heater()
             Serial.println("No AC signal detected");
         }
 
-        updateDisplay();
+        Error = true;
+        strcpy(ErrorString,"AC Disconnected");
+        UpdateDisplay();
     }
 
     // Look for zc. It should occur every 8.3ms. 
@@ -177,7 +263,7 @@ void heater()
         ZcMicrosLast = micros();
 
         // Enable the pin output if the dimmer output is greater than the current cycle number
-        if (Enable & cycleOn)
+        if (Enable & CycleOn)
         {
             digitalWrite(PIN_DIMMER_OUT, HIGH);
         }
@@ -189,6 +275,9 @@ void heater()
         //****** Calculate next cycle after the outputs for the current cycle are set ******
         // This allows the longest time to run calculations and output any trace data without impacting the zc detection.
         computeCompute();
+        if (Compute)
+            Error = false;
+        
         updateTemperature();
 
         // Disabled or no valid temperature: heater off.
@@ -215,33 +304,14 @@ void heater()
         // Run PID and tracing after the output is set, to prepare for the next zc
         updatePidOutput();
 
-        cycleOn = calculateCycleByDeltaSigma(PidOutput);
+        CycleOn = calculateCycleByDeltaSigma(PidOutput);
 
         updateKValueFromSerial();
         writeTraceOutputs();
-        updateDisplay();
+        UpdateDisplay();
     }
 }
 
-void tempDownClick()
-{
-    TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint - 1.0, TEMP_MAX);
-}
-
-void tempUpClick()
-{
-    TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint + 1.0, TEMP_MAX);
-}
-
-void tempUpLongPress()
-{
-    Enable = true;
-}
-
-void tempDownLongPress()
-{
-    Enable = false;
-}
 
 // Returns true if the temperature is low (error is high).
 // Latches until error is low.
@@ -272,7 +342,7 @@ LightState deriveLightState()
     {
         return LIGHT_OFF;
     }
-    else if (TempSensorError)
+    else if (Error)
     {
         return LIGHT_BLINK_1HZ;
     }
@@ -325,21 +395,33 @@ void updateTemperature()
 {
     const double n = 3.0; //iir filter average n
     static double t[3] = {0,0,0};
+    double humidityTemp = 0.0;
 
     if (Compute)
     {
         TemperatureRaw = dht.readTemperature(true,false);
+        humidityTemp = dht.readHumidity(false);
 
         if (!isnan(TemperatureRaw))
         {
             Temperature = iir3(round(TemperatureRaw * 10.0) / 10.0, t, n, 0.0 == Temperature);
-            TempSensorError = false;
         }
         // set error values if temp is invalid
         else
         {
             Temperature = 0;
-            TempSensorError = true;
+            Error = true;
+            strcpy(ErrorString,"Sensor Disc.");
+        }
+
+        if(!isnan(humidityTemp))
+        {
+            Humidity = humidityTemp;
+        }
+        // set error avlue if humidity is invalid - this is not considered a system error since it's not used for ocntrol
+        else
+        {
+            Humidity = 0;
         }
     }
 }
@@ -434,42 +516,59 @@ void writeTraceOutputs()
     }
 }
 
-// Refresh the LCD, one row per half-cycle so each write (~1.5 ms) fits in the remaining time.
-// Skipped on Compute half-cycles, which already spend most of the half-cycle on the DHT read and trace.
-// Row 0: "Set  78.0*F Heat"   (* is the LCD degree symbol, 0xDF)
-// Row 1: "Temp 72.3*F  45%"
-void updateDisplay()
+void UpdateDisplay()
 {
-    static char lines[LCD_ROWS][LCD_COLS + 1];
-    static uint8_t row = LCD_ROWS; // next row to write; LCD_ROWS = idle
-    static ulong displayMs;
+    static uint8_t row = 0;
+    static bool error = false;
 
-    if (!LcdOk | Compute)
+    if (Error)
     {
-        return;
+        if (!error)
+            lcd.clear();
+
+        lcd.setCursor(0, 0);
+        lcd.print("ERROR!");
+        lcd.setCursor(0, 1);
+        lcd.print(ErrorString);
+        error = true;
     }
 
-    // start a new refresh: snapshot both rows so they are consistent
-    if ((row >= LCD_ROWS) & (millis() - displayMs > DisplayIntervalMs))
+    else
     {
-        char num[8];
+        error = false;
 
-        displayMs = millis();
+        if (row == 0)
+        {
+            //lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Temp ");
+            lcd.print(Temperature, 1);
+            lcd.print("F RH ");
+            lcd.print(Humidity, 0);
+            lcd.print("%");
+            row++;
+        }
 
-        dtostrf(TempSetPoint, 5, 1, num);
-        snprintf(lines[0], sizeof(lines[0]), "Set %s\xDF" "F Heat", num);
+        if (row == 1)
+        {
+            lcd.setCursor(0, 1);
+            lcd.print("Set: ");
+            lcd.print(TempSetPoint, 0);
+            lcd.print("F ");
 
-        dtostrf(Temperature, 5, 1, num);
-        snprintf(lines[1], sizeof(lines[1]), "Temp%s\xDF" "F %3d%%", num, (int)(PidOutput + 0.5));
+            if (Enable)
+            {
+                lcd.print("PID ");
+                lcd.print(PidOutput,0);
+                lcd.print("%");
+            }
+            else
+            {
+                lcd.print("OFF");
+            }
 
-        row = 0;
-    }
-
-    if (row < LCD_ROWS)
-    {
-        lcd.setCursor(0, row);
-        lcd.write((const uint8_t*)lines[row], LCD_COLS);
-        row++;
+            row = 0;
+        }
     }
 }
 
