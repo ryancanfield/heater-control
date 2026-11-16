@@ -30,6 +30,10 @@
 #define PID_MAX 100
 #define PID_MIN 39
 
+// PID deadband (deg F): errors within +/- this band are treated as zero, and the band is
+// subtracted from larger errors so the P and I terms stay continuous at its edges.
+#define PID_DEADBAND 0.2
+
 // low temperature override hysteresis (deg F below setpoint)
 #define OVERRIDE_SET_ERROR 2.0
 #define OVERRIDE_RESET_ERROR 1.0
@@ -59,13 +63,16 @@ static bool CycleOn = false;
 static bool Error = false;
 static char ErrorString[LCD_COLS + 2] = "";
 
-double Temperature = 0.0f, TemperatureRaw = 0.0f, Humidity, PidOutput = 0.0f, TempSetPoint = 78.0f;
+double Temperature = 0.0f, TemperatureRaw = 0.0f, Humidity, PidOutput = 0.0f;
+double TempSetPoint = 75.0f;
+double PidSetPoint = 0.0f; // setpoint passed to the PID, adjusted each compute to apply PID_DEADBAND
 int DimmerOutputInt = 0;
-double Kp=40.0f; 
-double Ki=0.125f;
+double Kp=24.0f; 
+double Ki=0.5f;
 double Kd=700.0f;
 
-//kp 75 had an oscilation of 89 seconds
+//Ziegler-Nichols PID formulas
+//Kp 75 had an oscillation of 89 seconds (Ku = 75, Tu = 89 s)
 
 // Lots of overshoot
 //Kp = 0.6 * Ku          = 45
@@ -80,10 +87,11 @@ double Kd=700.0f;
 // No Overshoot
 //Kp = 0.2 * Ku          = 15
 //Ki = 0.4 * Ku / Tu     = 0.34
-//Kd = 0.066 * Ku * Tu   = 445.5   (this seems wrong)
+//Kd = 0.0667 * Ku * Tu  = 445.0   (Kp * Tu/3, i.e. Ku * Tu / 15)
 
-//zeigler nicholds pid: Kp = 0.6 * Ku, Ki = 2/Tu, Kd = Tu/8
-PID myPID(&Temperature, &PidOutput, &TempSetPoint, Kp, Ki, Kd, DIRECT);
+//Classic Ziegler-Nichols PID in time-constant form: Kp = 0.6 * Ku, Ti = Tu/2, Td = Tu/8
+//(PID_v1 takes gains: Ki = Kp / Ti, Kd = Kp * Td, matching the "Lots of overshoot" row)
+PID myPID(&Temperature, &PidOutput, &PidSetPoint, Kp, Ki, Kd, DIRECT);
 
 static bool Compute = false; // global command to process inputs, outputs, and traces
 const ulong ComputeInvertalMs = 2500; // ms interval to compute temp and PID
@@ -437,6 +445,10 @@ void updatePidOutput()
                 myPID.SetTunings(Kp,Ki,Kd);
             }
 
+            // Apply the deadband through the setpoint rather than the input: PID_v1 takes
+            // the derivative on the input, so this adds no derivative kick.
+            PidSetPoint = Temperature + applyDeadband(TempSetPoint - Temperature, PID_DEADBAND);
+
             // writes global pidOutput directly
             myPID.Compute();
         }
@@ -450,6 +462,23 @@ void updatePidOutput()
         {
             PidOutput = 0;
         }
+    }
+}
+
+// Returns 0 when |error| <= deadband, otherwise error moved toward 0 by deadband.
+double applyDeadband(double error, double deadband)
+{
+    if (error > deadband)
+    {
+        return error - deadband;
+    }
+    else if (error < -deadband)
+    {
+        return error + deadband;
+    }
+    else
+    {
+        return 0.0;
     }
 }
 
