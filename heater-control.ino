@@ -547,6 +547,7 @@ void UpdateDisplay()
 {
     static uint8_t row = 0;
     static bool error = false;
+    static bool enable = false;
 
     if (Error)
     {
@@ -564,9 +565,14 @@ void UpdateDisplay()
     {
         error = false;
 
+        if (enable != Enable)
+        {
+            lcd.clear();
+            enable = Enable;
+        }
+
         if (row == 0)
         {
-            //lcd.clear();
             lcd.setCursor(0, 0);
             lcd.print("Temp ");
             lcd.print(Temperature, 1);
