@@ -63,26 +63,24 @@ double Temperature = 0.0f, TemperatureRaw = 0.0f, Humidity, PidOutput = 0.0f, Te
 int DimmerOutputInt = 0;
 double Kp=40.0f; 
 double Ki=0.125f;
-// double Ki = 0.0;
 double Kd=700.0f;
-// double Kd = 0.0;
 
 //kp 75 had an oscilation of 89 seconds
 
 // Lots of overshoot
-//Kp = 0.6 * Ku
-//Ki = 1.2 * (Ku/Tu) = 
-//Kd = 0.075 * (Ku * Tu)
+//Kp = 0.6 * Ku          = 45
+//Ki = 1.2 * Ku / Tu     = 1.0
+//Kd = 0.075 * Ku * Tu   = 500.6
 
 // Some overshoot
-//Kp = 0.33 * Ku
-//Ki = 0.66 * Ku/Tu
-//Kd = 0.11 * Ku * Tu
+//Kp = 0.33 * Ku         = 24.75    
+//Ki = 0.66 * Ku / Tu    = 0.56
+//Kd = 0.11 * Ku * Tu    = 734.25
 
 // No Overshoot
-//Kp = 0.2 * Ku
-//Ki = 0.4 * Ku/Tu
-//Kd = 0.066 * Ku * Tu - (this seems wrong)
+//Kp = 0.2 * Ku          = 15
+//Ki = 0.4 * Ku / Tu     = 0.34
+//Kd = 0.066 * Ku * Tu   = 445.5   (this seems wrong)
 
 //zeigler nicholds pid: Kp = 0.6 * Ku, Ki = 2/Tu, Kd = Tu/8
 PID myPID(&Temperature, &PidOutput, &TempSetPoint, Kp, Ki, Kd, DIRECT);
