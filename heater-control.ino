@@ -67,9 +67,11 @@ double Temperature = 0.0f, TemperatureRaw = 0.0f, Humidity, PidOutput = 0.0f;
 double TempSetPoint = 75.0f;
 double PidSetPoint = 0.0f; // setpoint passed to the PID, adjusted each compute to apply PID_DEADBAND
 int DimmerOutputInt = 0;
-double Kp=24.0f; 
-double Ki=0.5f;
-double Kd=700.0f;
+// No-overshoot PI (see the Ziegler-Nichols PI notes below); Kd = 0 because derivative on a
+// 2.5 s sample of a slow heater is mostly noise, and iir3 already smooths the input.
+double Kp=11.25f;
+double Ki=0.152f;
+double Kd=0.0f;
 
 //Ziegler-Nichols PID formulas
 //Kp 75 had an oscillation of 89 seconds (Ku = 75, Tu = 89 s)
@@ -91,6 +93,18 @@ double Kd=700.0f;
 
 //Classic Ziegler-Nichols PID in time-constant form: Kp = 0.6 * Ku, Ti = Tu/2, Td = Tu/8
 //(PID_v1 takes gains: Ki = Kp / Ti, Kd = Kp * Td, matching the "Lots of overshoot" row)
+
+//Ziegler-Nichols PI formulas (Kd = 0), same Ku = 75, Tu = 89 s
+
+// Classic PI (standard Ziegler-Nichols): Kp = 0.45 * Ku, Ti = Tu / 1.2
+//Kp = 0.45 * Ku         = 33.75
+//Ki = 0.54 * Ku / Tu    = 0.455   (Ti = 74.2 s)
+
+// No overshoot PI (not a standard ZN rule; ZN only defines "no overshoot" for PID).
+// Derived the same way the PID no-overshoot row is: Kp cut to 1/3 of classic, Ti kept.
+//Kp = 0.15 * Ku         = 11.25
+//Ki = 0.18 * Ku / Tu    = 0.152   (Ti = Tu / 1.2 = 74.2 s)
+
 PID myPID(&Temperature, &PidOutput, &PidSetPoint, Kp, Ki, Kd, DIRECT);
 
 static bool Compute = false; // global command to process inputs, outputs, and traces
