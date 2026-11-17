@@ -2,7 +2,6 @@
 #include <DHT.h>
 #include <string.h>
 #include <stddef.h>
-#include <PID_v1.h>
 #include <math.h>
 #include <LiquidCrystal.h>
 
@@ -34,9 +33,9 @@
 // subtracted from larger errors so the P and I terms stay continuous at its edges.
 #define PID_DEADBAND 0.2
 
-// low temperature override hysteresis (deg F below setpoint)
-#define OVERRIDE_SET_ERROR 100. //was 2
-#define OVERRIDE_RESET_ERROR 99.0 // was 1
+// Starting value of the PI integral (output %) at power-up. Ideally near the output needed to
+// hold the setpoint, so control starts close to steady state.
+#define PI_INTEGRAL_SEED 50.0
 
 typedef unsigned long ulong;
 
@@ -81,37 +80,15 @@ static char ErrorString[LCD_COLS + 2] = "";
 
 double Temperature = 0.0f, TemperatureRaw = 0.0f, Humidity, PidOutputRaw = 0.0f, PidOutput = 0.0f;
 double TempSetPoint = 73.0f;
-double PidSetPoint = 0.0f; // setpoint passed to the PID, adjusted each compute to apply PID_DEADBAND
 int DimmerOutputInt = 0;
-// No-overshoot PI (see the Ziegler-Nichols PI notes below); Kd = 0 because derivative on a
-// 2.5 s sample of a slow heater is mostly noise, and iir3 already smooths the input.
+// PI gains (see the Ziegler-Nichols PI notes below). Kp is % output per deg F; Ki is % output
+// per deg F per second. No derivative: on a 2.5 s sample of a slow heater it is mostly noise,
+// and iir3 already smooths the input.
 double Kp=33.0f;
 double Ki=0.15f;
-double Kd=0.0f;
+double PiIntegral = PI_INTEGRAL_SEED; // integral term, in output %, kept between [PID_MIN, PID_MAX]
 
-//Ziegler-Nichols PID formulas
-//Kp 75 had an oscillation of 89 seconds (Ku = 75, Tu = 89 s)
-
-// Lots of overshoot
-//Kp = 0.6 * Ku          = 45
-//Ki = 1.2 * Ku / Tu     = 1.0
-//Kd = 0.075 * Ku * Tu   = 500.6
-
-// Some overshoot
-//Kp = 0.33 * Ku         = 24.75    
-//Ki = 0.66 * Ku / Tu    = 0.56
-//Kd = 0.11 * Ku * Tu    = 734.25
-
-// No Overshoot
-//Kp = 0.2 * Ku          = 15
-//Ki = 0.4 * Ku / Tu     = 0.34
-//Kd = 0.0667 * Ku * Tu  = 445.0   (Kp * Tu/3, i.e. Ku * Tu / 15)
-
-//Classic Ziegler-Nichols PID in time-constant form: Kp = 0.6 * Ku, Ti = Tu/2, Td = Tu/8
-//(PID_v1 takes gains: Ki = Kp / Ti, Kd = Kp * Td, matching the "Lots of overshoot" row)
-
-//Ziegler-Nichols PI formulas (Kd = 0), same Ku = 75, Tu = 89 s
-
+//Ziegler-Nichols PI formulas (Kd = 0), Ku = 75, Tu = 89 s
 // Classic PI (standard Ziegler-Nichols): Kp = 0.45 * Ku, Ti = Tu / 1.2
 //Kp = 0.45 * Ku         = 33.75
 //Ki = 0.54 * Ku / Tu    = 0.455   (Ti = 74.2 s)
@@ -120,8 +97,6 @@ double Kd=0.0f;
 // Derived the same way the PID no-overshoot row is: Kp cut to 1/3 of classic, Ti kept.
 //Kp = 0.15 * Ku         = 11.25
 //Ki = 0.18 * Ku / Tu    = 0.152   (Ti = Tu / 1.2 = 74.2 s)
-
-PID myPID(&Temperature, &PidOutputRaw, &PidSetPoint, Kp, Ki, Kd, DIRECT);
 
 static bool Compute = false; // global command to process inputs, outputs, and traces
 const ulong ComputeInvertalMs = 2500; // ms interval to compute temp and PID
@@ -158,9 +133,6 @@ void setup() {
 
     // begin() blocks for a few ms; fine here, before zc tracking starts
     lcd.begin(LCD_COLS, LCD_ROWS);
-
-    myPID.SetOutputLimits(PID_MIN, PID_MAX);
-    myPID.SetSampleTime(ComputeInvertalMs); //dht22 will only read a value every 2s
 }
 
 void loop()
@@ -262,8 +234,7 @@ void heater()
         Enable = false;
         digitalWrite(PIN_DIMMER_OUT, LOW);
 
-        // Disable the PID
-        myPID.SetMode(MANUAL);
+        PidOutputRaw = 0.0;
         PidOutput = 0.0;
 
         // Message the user
@@ -307,28 +278,7 @@ void heater()
         
         updateTemperature();
 
-        // Disabled or no valid temperature: heater off.
-        // Far below setpoint: full output with the PID bypassed to avoid integral windup.
-        // Otherwise: PID control.
-        if (!Enable | (Temperature <= 0))
-        {
-            myPID.SetMode(MANUAL);
-            PidOutput = 0.0;
-        }
-        else if (deriveLowTemperatureOverride())
-        {
-            myPID.SetMode(MANUAL);
-            PidOutput = PID_MAX;
-        }
-        else if (MANUAL == myPID.GetMode())
-        {
-            // SetMode(AUTOMATIC) seeds the integral from PidOutput; start it at the floor
-            // so the full-power warm-up doesn't carry over and cause overshoot.
-            PidOutput = PID_MIN;
-            myPID.SetMode(AUTOMATIC);
-        }
-
-        // Run PID and tracing after the output is set, to prepare for the next zc
+        // Run PI and tracing after the output is set, to prepare for the next zc
         updatePidOutput();
 
         CycleOn = calculateCycleByDeltaSigma(PidOutput);
@@ -339,28 +289,6 @@ void heater()
     }
 }
 
-
-// Returns true if the temperature is low (error is high).
-// Latches until error is low.
-bool deriveLowTemperatureOverride()
-{
-    static bool lowTempOverride = false;
-    double error = TempSetPoint - Temperature;
-
-    // calc low temp override
-    // reset when temperature is near the setpoint
-    if (error < OVERRIDE_RESET_ERROR)
-    {
-        lowTempOverride = false;
-    }
-    // set when temperature is low
-    else if (error > OVERRIDE_SET_ERROR)
-    {
-        lowTempOverride = true;
-    }
-
-    return lowTempOverride;
-}
 
 // Select the light state. Light is off when disabled; otherwise errors take priority over normal status, highest priority first.
 LightState deriveLightState()
@@ -453,35 +381,18 @@ void updateTemperature()
     }
 }
 
-// writes global pidOutput
+// Writes globals PidOutputRaw (PI output) and PidOutput (what drives the heater).
+// Disabled or no valid temperature: output 0 immediately and the integral is held.
 void updatePidOutput()
 {
-    if (Compute)
+    if (!Enable | (Temperature <= 0))
     {
-        // Run PID
-        if ((Temperature > 0) & Enable)
-        {
-            if ((myPID.GetKp() != Kp) | (myPID.GetKi() != Ki))
-            {
-                myPID.SetTunings(Kp,Ki,Kd);
-            }
-
-            // Apply the deadband through the setpoint rather than the input: PID_v1 takes
-            // the derivative on the input, so this adds no derivative kick.
-            PidSetPoint = Temperature + applyDeadband(TempSetPoint - Temperature, PID_DEADBAND);
-
-            // writes global pidOutput directly
-            myPID.Compute();
-
-            if (PidOutput <= PID_MIN)
-            {
-                PidOutput = 0;
-            }
-        }
-        else
-        {
-            PidOutputRaw = 0;
-        }
+        PidOutputRaw = 0;
+        PidOutput = 0;
+    }
+    else if (Compute)
+    {
+        PidOutputRaw = computePi(TempSetPoint, Temperature);
 
         // turn off when at the floor. the heater isn't outputing useful heat below this level
         if (PidOutputRaw <= PID_MIN)
@@ -493,6 +404,30 @@ void updatePidOutput()
             PidOutput = PidOutputRaw;
         }
     }
+}
+
+// One PI step, called every ComputeInvertalMs. Returns the output in [PID_MIN, PID_MAX].
+// Anti-windup by conditional integration: the integral is only updated when that doesn't push
+// the output further into saturation. During warm-up the P term holds the output at PID_MAX
+// while the integral stays put, so there is no stored excess to unwind as overshoot.
+// The integral is kept in output %, so changing Ki doesn't bump the output.
+double computePi(double setPoint, double input)
+{
+    const double dtSec = ComputeInvertalMs / 1000.0;
+    double error = applyDeadband(setPoint - input, PID_DEADBAND);
+    double p = Kp * error;
+    double integral = PiIntegral + Ki * dtSec * error;
+    double output = p + integral;
+
+    bool saturatedHigh = (output > PID_MAX) & (error > 0);
+    bool saturatedLow = (output < PID_MIN) & (error < 0);
+
+    if (!(saturatedHigh | saturatedLow))
+    {
+        PiIntegral = LIMIT(PID_MIN, integral, PID_MAX);
+    }
+
+    return LIMIT(PID_MIN, p + PiIntegral, PID_MAX);
 }
 
 // Returns 0 when |error| <= deadband, otherwise error moved toward 0 by deadband.
@@ -570,7 +505,9 @@ void writeTraceOutputs()
         Serial.print(",PidOutput:");
         Serial.print(PidOutput);        
         Serial.print(",PidOutputRaw:");
-        Serial.print(PidOutputRaw);    
+        Serial.print(PidOutputRaw);
+        Serial.print(",PiIntegral:");
+        Serial.print(PiIntegral);
         Serial.println();
     }
 }
