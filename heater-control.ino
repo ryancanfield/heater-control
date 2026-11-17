@@ -28,15 +28,15 @@
 #define LCD_ROWS 2
 
 #define PID_MAX 100
-#define PID_MIN 39
+#define PID_MIN 40 // Below a certain percentage, the heat provided is ineffective and it makes the lights flicker noticably.
 
 // PID deadband (deg F): errors within +/- this band are treated as zero, and the band is
 // subtracted from larger errors so the P and I terms stay continuous at its edges.
 #define PID_DEADBAND 0.2
 
 // low temperature override hysteresis (deg F below setpoint)
-#define OVERRIDE_SET_ERROR 2.0
-#define OVERRIDE_RESET_ERROR 1.0
+#define OVERRIDE_SET_ERROR 100. //was 2
+#define OVERRIDE_RESET_ERROR 99.0 // was 1
 
 typedef unsigned long ulong;
 
@@ -47,12 +47,28 @@ typedef unsigned long ulong;
 static DHT dht(PIN_DHT_OUT, DHT22);
 static LiquidCrystal lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7);
 
-static bool ButtonRight;
-static bool ButtonUp;
-static bool ButtonDown;
-static bool ButtonLeft;
-static bool ButtonSelect;
-static bool ButtonReset;
+// Buttons on the LCD shield resistor ladder, decoded from BUTTON_PIN by readButton()
+enum Button
+{
+    BUTTON_NONE,
+    BUTTON_RIGHT,
+    BUTTON_UP,
+    BUTTON_DOWN,
+    BUTTON_LEFT,
+    BUTTON_SELECT,
+    BUTTON_RESET
+};
+
+// Display screens, rotated with the left/right buttons. Up/down act on the current screen.
+enum Screen
+{
+    SCREEN_MAIN, // temp, humidity, setpoint, PID output; up/down change the setpoint
+    SCREEN_KP,   // up/down change Kp by 10%, whole numbers, min step 1
+    SCREEN_KI,   // up/down change Ki by 10%, rounded to 0.01, min step 0.01
+    SCREEN_COUNT
+};
+
+static Screen CurrentScreen = SCREEN_MAIN;
 
 const ulong DisplayIntervalMs = 250; // ms between display refreshes
 static bool LcdOk = false;
@@ -63,14 +79,14 @@ static bool CycleOn = false;
 static bool Error = false;
 static char ErrorString[LCD_COLS + 2] = "";
 
-double Temperature = 0.0f, TemperatureRaw = 0.0f, Humidity, PidOutput = 0.0f;
-double TempSetPoint = 75.0f;
+double Temperature = 0.0f, TemperatureRaw = 0.0f, Humidity, PidOutputRaw = 0.0f, PidOutput = 0.0f;
+double TempSetPoint = 73.0f;
 double PidSetPoint = 0.0f; // setpoint passed to the PID, adjusted each compute to apply PID_DEADBAND
 int DimmerOutputInt = 0;
 // No-overshoot PI (see the Ziegler-Nichols PI notes below); Kd = 0 because derivative on a
 // 2.5 s sample of a slow heater is mostly noise, and iir3 already smooths the input.
-double Kp=11.25f;
-double Ki=0.152f;
+double Kp=33.0f;
+double Ki=0.15f;
 double Kd=0.0f;
 
 //Ziegler-Nichols PID formulas
@@ -105,7 +121,7 @@ double Kd=0.0f;
 //Kp = 0.15 * Ku         = 11.25
 //Ki = 0.18 * Ku / Tu    = 0.152   (Ti = Tu / 1.2 = 74.2 s)
 
-PID myPID(&Temperature, &PidOutput, &PidSetPoint, Kp, Ki, Kd, DIRECT);
+PID myPID(&Temperature, &PidOutputRaw, &PidSetPoint, Kp, Ki, Kd, DIRECT);
 
 static bool Compute = false; // global command to process inputs, outputs, and traces
 const ulong ComputeInvertalMs = 2500; // ms interval to compute temp and PID
@@ -150,94 +166,85 @@ void setup() {
 void loop()
 {
     heater();
-    getButtons();
+    buttons();
 }
 
-void getButtons()
+// Decode the resistor ladder voltage into the pressed button
+Button getButtonPressed()
 {
     int key = analogRead(BUTTON_PIN);
 
-    if (key < 50)
-    {
-        ButtonRight = true;
-        ButtonUp = false;
-        ButtonDown = false;
-        ButtonLeft = false;
-        ButtonSelect = false;
-        ButtonReset = false;
-    }
+    if (key < 50)        return BUTTON_RIGHT;
+    else if (key < 200)  return BUTTON_UP;
+    else if (key < 400)  return BUTTON_DOWN;
+    else if (key < 600)  return BUTTON_LEFT;
+    else if (key < 800)  return BUTTON_SELECT;
+    else if (key < 1000) return BUTTON_RESET;
+    else                 return BUTTON_NONE;
+}
 
-    else if (key < 200)
-    {
-        ButtonRight = false;
-        ButtonDown = false;
-        ButtonLeft = false;
-        ButtonSelect = false;
-        ButtonReset = false;
-        
-        if (!ButtonUp)
-        {
-            ButtonUp = true;
-            TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint + 1.0, TEMP_MAX);
-        }
-    }
+// Act once per press (on the transition from no button / another button)
+void buttons()
+{
+    static Button last = BUTTON_NONE;
+    Button button = getButtonPressed();
 
-    else if (key < 400)
+    if (button == last)
     {
-        ButtonRight = false;
-        ButtonUp = false;
-        ButtonLeft = false;
-        ButtonSelect = false;
-        ButtonReset = false;
-        
-        if (!ButtonDown)
-        {
-            ButtonDown = true;
-            TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint - 1.0, TEMP_MAX);
-        }
+        return;
     }
+    last = button;
 
-    else if (key < 600)
+    switch (button)
     {
-        ButtonRight = false;
-        ButtonUp = false;
-        ButtonDown = false;
-        ButtonLeft = true;
-        ButtonSelect = false;
-        ButtonReset = false;
-    }
+        case BUTTON_RIGHT:
+            CurrentScreen = (Screen)((CurrentScreen + 1) % SCREEN_COUNT);
+            break;
 
-    else if (key < 800)
-    {
-        ButtonRight = false;
-        ButtonUp = false;
-        ButtonDown = false;
-        ButtonLeft = false;
-        ButtonReset = false;
-        
-        if (!ButtonSelect)
-        {
-            ButtonSelect = true;
+        case BUTTON_LEFT:
+            CurrentScreen = (Screen)((CurrentScreen + SCREEN_COUNT - 1) % SCREEN_COUNT);
+            break;
+
+        case BUTTON_UP:
+            adjustScreenValue(true);
+            break;
+
+        case BUTTON_DOWN:
+            adjustScreenValue(false);
+            break;
+
+        case BUTTON_SELECT:
             Enable = !Enable;
-        }
+            break;
+
+        default:
+            break;
     }
-    else if (key < 1000)
+}
+
+// Up/down action for the current screen
+void adjustScreenValue(bool up)
+{
+    double step;
+
+    switch (CurrentScreen)
     {
-        ButtonRight = false;
-        ButtonUp = false;
-        ButtonDown = false;
-        ButtonLeft = false;
-        ButtonSelect = false;
-        ButtonReset = true;
-    }
-    else
-    {
-        ButtonRight = false;
-        ButtonUp = false;
-        ButtonDown = false;
-        ButtonLeft = false;
-        ButtonSelect = false;
-        ButtonReset = false;
+        case SCREEN_KP:
+            // 10% of Kp, whole numbers, at least 1
+            step = MAX(1.0, round(Kp * 0.1));
+            Kp = MAX(0.0, round(up ? Kp + step : Kp - step));
+            break;
+
+        case SCREEN_KI:
+            // 10% of Ki, rounded to 0.01, at least 0.01
+            step = MAX(0.01, round(Ki * 10.0) / 100.0);
+            Ki = MAX(0.0, round((up ? Ki + step : Ki - step) * 100.0) / 100.0);
+            break;
+
+        case SCREEN_MAIN:
+        default:
+            TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint + (up ? 1.0 : -1.0), TEMP_MAX);
+            break;
     }
 }
 
@@ -454,7 +461,7 @@ void updatePidOutput()
         // Run PID
         if ((Temperature > 0) & Enable)
         {
-            if (myPID.GetKp() != Kp)
+            if ((myPID.GetKp() != Kp) | (myPID.GetKi() != Ki))
             {
                 myPID.SetTunings(Kp,Ki,Kd);
             }
@@ -465,16 +472,25 @@ void updatePidOutput()
 
             // writes global pidOutput directly
             myPID.Compute();
+
+            if (PidOutput <= PID_MIN)
+            {
+                PidOutput = 0;
+            }
         }
         else
         {
-            PidOutput = 0;
+            PidOutputRaw = 0;
         }
 
         // turn off when at the floor. the heater isn't outputing useful heat below this level
-        if (PidOutput <= PID_MIN)
+        if (PidOutputRaw <= PID_MIN)
         {
             PidOutput = 0;
+        }
+        else
+        {
+            PidOutput = PidOutputRaw;
         }
     }
 }
@@ -553,6 +569,8 @@ void writeTraceOutputs()
         Serial.print(TemperatureRaw,2);     
         Serial.print(",PidOutput:");
         Serial.print(PidOutput);        
+        Serial.print(",PidOutputRaw:");
+        Serial.print(PidOutputRaw);    
         Serial.println();
     }
 }
@@ -562,6 +580,7 @@ void UpdateDisplay()
     static uint8_t row = 0;
     static bool error = false;
     static bool enable = false;
+    static Screen screen = SCREEN_MAIN;
 
     if (Error)
     {
@@ -579,13 +598,18 @@ void UpdateDisplay()
     {
         error = false;
 
-        if (enable != Enable)
+        if ((enable != Enable) | (screen != CurrentScreen))
         {
             lcd.clear();
             enable = Enable;
+            screen = CurrentScreen;
         }
 
-        if (row == 0)
+        if (CurrentScreen != SCREEN_MAIN)
+        {
+            updateGainDisplay();
+        }
+        else if (row == 0)
         {
             lcd.setCursor(0, 0);
             lcd.print("Temp ");
@@ -616,6 +640,51 @@ void UpdateDisplay()
 
             row = 0;
         }
+    }
+}
+
+// Kp / Ki screen: the selected gain on row 0, temperature and PID output on row 1 for feedback while tuning.
+// Rows are padded with spaces so a shorter value overwrites a longer one.
+void updateGainDisplay()
+{
+    size_t n;
+
+    lcd.setCursor(0, 0);
+    if (CurrentScreen == SCREEN_KP)
+    {
+        n = lcd.print("Kp: ");
+        n += lcd.print(Kp, 0);
+    }
+    else
+    {
+        n = lcd.print("Ki: ");
+        n += lcd.print(Ki, 2);
+    }
+    padLcdRow(n);
+
+    lcd.setCursor(0, 1);
+    n = lcd.print("T ");
+    n += lcd.print(Temperature, 1);
+    n += lcd.print("F ");
+    if (Enable)
+    {
+        n += lcd.print("PID ");
+        n += lcd.print(PidOutput, 0);
+        n += lcd.print("%");
+    }
+    else
+    {
+        n += lcd.print("OFF");
+    }
+    padLcdRow(n);
+}
+
+// Fill the rest of an LCD row with spaces after n characters were written
+void padLcdRow(size_t n)
+{
+    for (; n < LCD_COLS; n++)
+    {
+        lcd.print(' ');
     }
 }
 

@@ -36,7 +36,7 @@ Control details:
   - Disabled, or no valid temperature (`Temperature <= 0`, i.e. a DHT read failed): PID in `MANUAL`, output 0.
   - Low-temperature override (`deriveLowTemperatureOverride()`): PID in `MANUAL`, output `PID_MAX`, to warm up without integral windup. It latches on when more than `OVERRIDE_SET_ERROR` (2 °F) below setpoint and clears when within `OVERRIDE_RESET_ERROR` (1 °F).
   - Otherwise: PID in `AUTOMATIC`. On the switch from `MANUAL`, `PidOutput` is set to `PID_MIN` first, because `SetMode(AUTOMATIC)` seeds the PID integral from the current output.
-- Buttons (OneButton, active-low with pullups): click = setpoint ±1 °F (clamped 55–85); long-press up = enable heater, long-press down = disable.
+- Buttons (LCD shield resistor ladder on `BUTTON_PIN` A0): `readButton()` decodes the analog value to a `Button`, and `getButtons()` acts once per press. Select toggles `Enable`. Left/right rotate `CurrentScreen` through `Screen` (`SCREEN_MAIN` default, `SCREEN_KP`, `SCREEN_KI`); up/down call `adjustScreenValue()`, which acts on the current screen: Main = setpoint ±1 °F (clamped 55–85), Kp = ±10 % rounded to whole numbers (min step 1), Ki = ±10 % rounded to 0.01 (min step 0.01). Gains are clamped at ≥ 0. To add a screen, add a `Screen` value before `SCREEN_COUNT`, a case in `adjustScreenValue()`, and its display in `UpdateDisplay()`.
 - Status LED (`PIN_LIGHT`): `deriveLightState()` maps error flags and `Enable` to a `LightState`, and `updateLight()` drives the pin every `loop()` iteration, using `millis()` for blink timing. Disabled always means off (errors are not shown); when enabled, errors take priority over the steady-on state. Currently: off = disabled, on = enabled, 1 Hz blink = temperature sensor error while enabled (`TempSensorError`). To add an indication, add an error flag, a `LightState` value, a branch in `deriveLightState()`, and a case in `updateLight()`.
 - LCD (1602A, `hd44780_pinIO`, 4-bit, RW tied to GND; RS=3, E=5, D4=7, D5=11, D6=12, D7=13): `updateDisplay()` shows setpoint, temperature and `PidOutput`. It refreshes every `DisplayIntervalMs` (250 ms), writing one row per half-cycle (~1.5 ms each) and skipping `Compute` half-cycles so the DHT read and LCD writes never share a half-cycle.
 - Tuning gains `Kp/Ki/Kd` are globals near the top, with commented Ziegler–Nichols notes and observed oscillation periods.
@@ -44,4 +44,5 @@ Control details:
 ## Known quirks
 
 - Conditions use bitwise `&`/`|` on bools (e.g. `Enable & cycleOn`); this works because the operands are `bool`.
-- `updatePidOutput` only re-applies tunings when `Kp` changes.
+- `updatePidOutput` only re-applies tunings when `Kp` or `Ki` changes (not `Kd`).
+- Gain screens (`updateGainDisplay()`) show the gain on row 0 and temperature/PID output on row 1, padded with `padLcdRow()`; the LCD is cleared when the screen or `Enable` changes.
