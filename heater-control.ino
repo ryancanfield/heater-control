@@ -8,8 +8,9 @@
 #define PIN_DHT_0V 13
 #define PIN_DHT_VCC 12
 #define PIN_DHT_OUT 11
-#define TEMP_MIN 55u
-#define TEMP_MAX 85u
+// Setpoint limits in deg F. The setpoint is adjusted in whole deg F but stored and controlled in deg C.
+#define TEMP_MIN_F 55.0
+#define TEMP_MAX_F 85.0
 #define PIN_DIMMER_OUT 3 //dimmer output
 #define PIN_DIMMER_ZC 2 //zero cross
 #define PIN_LIGHT 1
@@ -29,9 +30,11 @@
 #define PID_MAX 100
 #define PID_MIN 40 // Below a certain percentage, the heat provided is ineffective and it makes the lights flicker noticably.
 
-// PID deadband (deg F): errors within +/- this band are treated as zero, and the band is
+// PID deadband (deg C): errors within +/- this band are treated as zero, and the band is
 // subtracted from larger errors so the P and I terms stay continuous at its edges.
-#define PID_DEADBAND 0.2
+// The DHT22 reads in 0.1 C steps, so a band of at least half a step (0.05 C) always contains a
+// reachable reading, whatever the setpoint; without it the integral hunts between two readings.
+#define PID_DEADBAND 0.06
 
 // Starting value of the PI integral (output %) at power-up. Ideally near the output needed to
 // hold the setpoint, so control starts close to steady state.
@@ -42,6 +45,11 @@ typedef unsigned long ulong;
 #define MAX(a, b) ((a)>(b)?(a):(b))
 #define MIN(a, b) ((a)<(b)?(a):(b))
 #define LIMIT(min, in, max) (MAX((min), MIN((max),(in))))
+
+// Macros, not functions: a global initializer uses fToC, and a function defined this early would
+// make the Arduino preprocessor put its generated prototypes above the enums they need.
+#define cToF(c) ((c) * 1.8 + 32.0)
+#define fToC(f) (((f) - 32.0) / 1.8)
 
 static DHT dht(PIN_DHT_OUT, DHT22);
 static LiquidCrystal lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7);
@@ -78,25 +86,28 @@ static bool CycleOn = false;
 static bool Error = false;
 static char ErrorString[LCD_COLS + 2] = "";
 
+// All temperatures are deg C internally; the LCD shows deg F.
 double Temperature = 0.0f, TemperatureRaw = 0.0f, Humidity, PidOutputRaw = 0.0f, PidOutput = 0.0f;
-double TempSetPoint = 73.0f;
+static bool TemperatureValid = false; // false until the first good DHT read, and after a failed one
+double TempSetPoint = fToC(73.0);
 int DimmerOutputInt = 0;
-// PI gains (see the Ziegler-Nichols PI notes below). Kp is % output per deg F; Ki is % output
-// per deg F per second. No derivative: on a 2.5 s sample of a slow heater it is mostly noise,
+// PI gains (see the Ziegler-Nichols PI notes below). Kp is % output per deg C; Ki is % output
+// per deg C per second. No derivative: on a 2.5 s sample of a slow heater it is mostly noise,
 // and iir3 already smooths the input.
-double Kp=33.0f;
-double Ki=0.15f;
+double Kp=59.0f; // was 33 %/F
+double Ki=0.27f; // was 0.15 %/F/s
 double PiIntegral = PI_INTEGRAL_SEED; // integral term, in output %, kept between [PID_MIN, PID_MAX]
 
-//Ziegler-Nichols PI formulas (Kd = 0), Ku = 75, Tu = 89 s
+//Ziegler-Nichols PI formulas (Kd = 0), Tu = 89 s
+//Ku = 75 %/F measured, = 135 %/C (gains in deg C units are 1.8x the deg F ones)
 // Classic PI (standard Ziegler-Nichols): Kp = 0.45 * Ku, Ti = Tu / 1.2
-//Kp = 0.45 * Ku         = 33.75
-//Ki = 0.54 * Ku / Tu    = 0.455   (Ti = 74.2 s)
+//Kp = 0.45 * Ku         = 60.75   (33.75 in %/F)
+//Ki = 0.54 * Ku / Tu    = 0.819   (0.455 in %/F/s, Ti = 74.2 s)
 
 // No overshoot PI (not a standard ZN rule; ZN only defines "no overshoot" for PID).
 // Derived the same way the PID no-overshoot row is: Kp cut to 1/3 of classic, Ti kept.
-//Kp = 0.15 * Ku         = 11.25
-//Ki = 0.18 * Ku / Tu    = 0.152   (Ti = Tu / 1.2 = 74.2 s)
+//Kp = 0.15 * Ku         = 20.25   (11.25 in %/F)
+//Ki = 0.18 * Ku / Tu    = 0.273   (0.152 in %/F/s, Ti = Tu / 1.2 = 74.2 s)
 
 static bool Compute = false; // global command to process inputs, outputs, and traces
 const ulong ComputeInvertalMs = 2500; // ms interval to compute temp and PID
@@ -215,7 +226,8 @@ void adjustScreenValue(bool up)
 
         case SCREEN_MAIN:
         default:
-            TempSetPoint = LIMIT(TEMP_MIN, TempSetPoint + (up ? 1.0 : -1.0), TEMP_MAX);
+            // step in whole deg F; rounding first keeps the setpoint on whole deg F despite the C storage
+            TempSetPoint = fToC(LIMIT(TEMP_MIN_F, round(cToF(TempSetPoint)) + (up ? 1.0 : -1.0), TEMP_MAX_F));
             break;
     }
 }
@@ -348,23 +360,28 @@ void computeCompute()
 
 void updateTemperature()
 {
-    const double n = 3.0; //iir filter average n
+    const double n = 2.0; //iir filter average n
     static double t[3] = {0,0,0};
     double humidityTemp = 0.0;
 
     if (Compute)
     {
-        TemperatureRaw = dht.readTemperature(true,false);
+        // deg C, the sensor's native unit (0.1 C steps), so no rounding is needed
+        TemperatureRaw = dht.readTemperature(false,false);
         humidityTemp = dht.readHumidity(false);
 
         if (!isnan(TemperatureRaw))
         {
-            Temperature = iir3(round(TemperatureRaw * 10.0) / 10.0, t, n, 0.0 == Temperature);
+            // re-initialize the filter on the first good read after startup or a failure
+            //Temperature = iir3(TemperatureRaw, t, n, !TemperatureValid); TODO testing no filter
+            Temperature = TemperatureRaw;
+            TemperatureValid = true;
         }
         // set error values if temp is invalid
         else
         {
             Temperature = 0;
+            TemperatureValid = false;
             Error = true;
             strcpy(ErrorString,"Sensor Disc.");
         }
@@ -385,7 +402,7 @@ void updateTemperature()
 // Disabled or no valid temperature: output 0 immediately and the integral is held.
 void updatePidOutput()
 {
-    if (!Enable | (Temperature <= 0))
+    if (!Enable | !TemperatureValid)
     {
         PidOutputRaw = 0;
         PidOutput = 0;
@@ -493,11 +510,11 @@ void updateKValueFromSerial()
 
 void writeTraceOutputs()
 {
-    // Scope output
+    // Scope output, temperatures in deg C
     if (Compute)
     {
         Serial.print(",sp:");
-        Serial.print(TempSetPoint,0);
+        Serial.print(TempSetPoint,2);
         Serial.print(",t:");
         Serial.print(Temperature,2);
         Serial.print(",tRaw:");
@@ -550,7 +567,7 @@ void UpdateDisplay()
         {
             lcd.setCursor(0, 0);
             lcd.print("Temp ");
-            lcd.print(Temperature, 1);
+            lcd.print(cToF(Temperature), 1);
             lcd.print("F RH ");
             lcd.print(Humidity, 0);
             lcd.print("%");
@@ -561,7 +578,7 @@ void UpdateDisplay()
         {
             lcd.setCursor(0, 1);
             lcd.print("Set: ");
-            lcd.print(TempSetPoint, 0);
+            lcd.print(cToF(TempSetPoint), 0);
             lcd.print("F ");
 
             if (Enable)
@@ -601,7 +618,7 @@ void updateGainDisplay()
 
     lcd.setCursor(0, 1);
     n = lcd.print("T ");
-    n += lcd.print(Temperature, 1);
+    n += lcd.print(cToF(Temperature), 1);
     n += lcd.print("F ");
     if (Enable)
     {
